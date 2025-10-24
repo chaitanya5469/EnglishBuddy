@@ -1,0 +1,1 @@
+web: uvicorn serve:app --host 0.0.0.0 --port $PORT & streamlit run client.py --server.port 8501

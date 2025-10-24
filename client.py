@@ -1,6 +1,18 @@
 import requests
 import streamlit as st
 from datetime import datetime
+import subprocess
+import time
+import os
+
+# Start FastAPI server in background (only once)
+if 'server_started' not in st.session_state:
+    try:
+        subprocess.Popen(["uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"])
+        time.sleep(3)  # Wait for server to start
+        st.session_state.server_started = True
+    except Exception as e:
+        st.error(f"Failed to start server: {e}")
 
 # Page configuration
 st.set_page_config(
@@ -160,6 +172,9 @@ if 'messages' not in st.session_state:
 if 'input_key' not in st.session_state:
     st.session_state.input_key = 0
 
+# Get API URL from environment, default to localhost for development
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+
 def get_groq_response(input_text):
     """Send request to the API and get response"""
     json_body = {
@@ -170,7 +185,7 @@ def get_groq_response(input_text):
         "kwargs": {}
     }
     try:
-        response = requests.post("http://127.0.0.1:8000/chain/invoke", json=json_body)
+        response = requests.post(f"{API_URL}/chain/invoke", json=json_body, timeout=30)
         result = response.json()
         
         if 'output' in result:
