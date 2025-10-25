@@ -4,6 +4,8 @@ from datetime import datetime
 import subprocess
 import time
 import os
+from audio_recorder_streamlit import audio_recorder
+from groq import Groq
 
 # Start FastAPI server in background (only once)
 if 'server_started' not in st.session_state:
@@ -162,6 +164,14 @@ st.markdown("""
         font-size: 4rem;
         margin-bottom: 1rem;
     }
+    
+    /* Voice indicator */
+    .voice-indicator {
+        text-align: center;
+        padding: 0.5rem;
+        color: #667eea;
+        font-size: 0.9rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -172,8 +182,56 @@ if 'messages' not in st.session_state:
 if 'input_key' not in st.session_state:
     st.session_state.input_key = 0
 
-# Get API URL from environment, default to localhost for development
+if 'recording_start_time' not in st.session_state:
+    st.session_state.recording_start_time = None
+
+if 'is_recording' not in st.session_state:
+    st.session_state.is_recording = False
+if 'transcribed_text' not in st.session_state:
+    st.session_state.transcribed_text = ""
+
+# Get API URL and Groq API key from environment
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+import dotenv
+dotenv.load_dotenv()
+
+# Initialize Groq client
+
+groq_client = Groq()
+
+
+def transcribe_audio_with_groq(audio_bytes):
+    """Transcribe audio to text using Groq's Whisper model"""
+    if not groq_client:
+        return "Groq API key not configured"
+    
+    try:
+        # Save audio bytes to a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", mode='wb') as tmp_file:
+            tmp_file.write(audio_bytes)
+            tmp_file_path = tmp_file.name
+        
+        # Transcribe using Groq Whisper
+        with open(tmp_file_path, "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(tmp_file_path, audio_file.read()),
+                model="whisper-large-v3",
+                response_format="text",
+                language="te"
+                
+            )
+        
+        # Clean up temporary file
+        os.unlink(tmp_file_path)
+        
+        # Return the transcription text
+        return transcription if isinstance(transcription, str) else transcription.text
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        st.error(f"Transcription error details: {error_details}")
+        return f"Error transcribing audio: {str(e)}"
 
 def get_groq_response(input_text):
     """Send request to the API and get response"""
@@ -211,6 +269,37 @@ def display_message(role, content, timestamp):
     </div>
     """, unsafe_allow_html=True)
 
+def process_message(text):
+    """Process and send a message"""
+    if text and text.strip():
+        # Get current timestamp
+        timestamp = datetime.now().strftime("%H:%M")
+        
+        # Add user message to history
+        st.session_state.messages.append({
+            'role': 'user',
+            'content': text,
+            'timestamp': timestamp
+        })
+        
+        # Get bot response
+        with st.spinner("Thinking..."):
+            bot_response = get_groq_response(text)
+        
+        # Add bot response to history
+        st.session_state.messages.append({
+            'role': 'bot',
+            'content': bot_response,
+            'timestamp': datetime.now().strftime("%H:%M")
+        })
+        
+        # Clear transcribed text and increment key
+        st.session_state.transcribed_text = ""
+        st.session_state.input_key += 1
+        
+        # Rerun to update the display
+        st.rerun()
+
 # Header
 st.markdown("""
 <div class="header-container">
@@ -230,7 +319,7 @@ else:
     st.markdown("""
     <div class="empty-state">
         <div class="empty-state-icon">💭</div>
-        <div>Start a conversation by typing a message below!</div>
+        <div>Start a conversation by typing or speaking a message below!</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -241,49 +330,77 @@ col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
     if st.button("🗑️ Clear Chat", use_container_width=True) and st.session_state.messages:
         st.session_state.messages = []
+        st.session_state.transcribed_text = ""
         st.session_state.input_key += 1
         st.rerun()
 
 # Input area
 st.markdown("---")
-col1, col2 = st.columns([5, 1])
+
+# Voice recording (only show if Groq API key is configured)
+if groq_client:
+    col_voice1, col_voice2, col_voice3 = st.columns([1, 2, 1])
+    with col_voice2:
+        
+        audio_bytes = audio_recorder(
+            text="",
+            recording_color="#667eea",
+            neutral_color="#6b7280",
+            icon_name="microphone",
+            icon_size="2x",
+            sample_rate=44100,
+        )
+        
+        # Process audio when recording is complete
+        if audio_bytes:
+            # Check if this is a new recording
+            if audio_bytes != st.session_state.get('last_audio'):
+                # Calculate audio duration (approximate)
+                audio_duration = len(audio_bytes) / (44100 * 2)  # 44.1kHz, 16-bit (2 bytes)
+                
+                if audio_duration < 1.0:
+                    st.warning(f"⚠️ Recording too short ({audio_duration:.2f}s). Please hold the button for at least 1 second.")
+                else:
+                    st.session_state.last_audio = audio_bytes
+                    with st.spinner("Transcribing with Groq Whisper..."):
+                        transcribed = transcribe_audio_with_groq(audio_bytes)
+                        # Debug: Show what we got
+                        st.write(f"Debug - Transcription result: '{transcribed}'")
+                        if transcribed and isinstance(transcribed, str) and not transcribed.startswith("Error"):
+                            st.session_state.transcribed_text = transcribed.strip()
+                            st.success(f"✅ Transcribed successfully!")
+                            st.rerun()
+                        else:
+                            st.error(f"Transcription failed: {transcribed}")
+
+# Show transcribed text if available
+if st.session_state.transcribed_text:
+    st.info(f"🎤 Transcribed: {st.session_state.transcribed_text}")
+
+# Text input area
+col1, col2, col3 = st.columns([5, 1, 1])
 
 with col1:
-    input_text = st.text_input(
+    input_text = st.text_area(
         "Message",
-        placeholder="Type your message here...",
+        value=st.session_state.transcribed_text,
+        placeholder="Type your message here or use voice...",
         label_visibility="collapsed",
-        key=f"user_input_{st.session_state.input_key}"
+        key=f"user_input_{st.session_state.input_key}",
+        height=100
     )
 
 with col2:
     send_button = st.button("Send", use_container_width=True)
 
+with col3:
+    if st.session_state.transcribed_text:
+        if st.button("❌", use_container_width=True):
+            st.session_state.transcribed_text = ""
+            st.rerun()
+
 # Handle message sending
-if send_button and input_text.strip():
-    # Get current timestamp
-    timestamp = datetime.now().strftime("%H:%M")
-    
-    # Add user message to history
-    st.session_state.messages.append({
-        'role': 'user',
-        'content': input_text,
-        'timestamp': timestamp
-    })
-    
-    # Get bot response
-    with st.spinner("Thinking..."):
-        bot_response = get_groq_response(input_text)
-    
-    # Add bot response to history
-    st.session_state.messages.append({
-        'role': 'bot',
-        'content': bot_response,
-        'timestamp': datetime.now().strftime("%H:%M")
-    })
-    
-    # Increment key to clear input field
-    st.session_state.input_key += 1
-    
-    # Rerun to update the display
-    st.rerun()
+if send_button:
+    if st.session_state.transcribed_text:
+        process_message(st.session_state.transcribed_text)
+    process_message(input_text)

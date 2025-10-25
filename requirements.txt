@@ -34,3 +34,5 @@ fastapi
 uvicorn
 langserve
 sse_starlette
+audio-recorder-streamlit 
+SpeechRecognition
